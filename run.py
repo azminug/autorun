@@ -130,10 +130,14 @@ class RobloxAutoLoginV6:
         # Initialize alert handler for protocol dialogs
         self.alert_handler = BrowserAlertHandler(self.driver)
         
+        # Initialize notification service
+        from services.notification_service import NotificationService
+        self.notifier = NotificationService()
+        
         self.logger.info("🌐 Browser ready")
     
     def login_roblox(self, username, password):
-        """Login to Roblox"""
+        """Login to Roblox with captcha/verification detection"""
         self.logger.info(f"🔐 Logging in: {username}")
         
         # Update Firebase
@@ -162,10 +166,30 @@ class RobloxAutoLoginV6:
                 # Wait for redirect or error
                 time.sleep(3)
                 
-                # Check if verification needed
-                if self._check_verification(username):
-                    # Verification handled, check if still on login
-                    pass
+                # Detect what type of challenge is present
+                challenge_type = self._detect_challenge_type()
+                
+                if challenge_type:
+                    self.logger.info(f"⚠️ {challenge_type} detected for {username}")
+                    self._update_status(username, challenge_type.lower().replace(" ", "_"))
+                    
+                    # Send notification for manual assistance
+                    self._notify_manual_required(username, challenge_type, attempt)
+                    
+                    # Wait for user to solve
+                    solved = self._wait_for_challenge_solved(username, challenge_type)
+                    
+                    if solved:
+                        self.logger.info(f"✅ {challenge_type} solved for {username}")
+                        # Check login success after solving
+                        time.sleep(2)
+                        if self._check_login_success():
+                            self.logger.info(f"✅ Login success: {username}")
+                            self._notify_challenge_solved(username, challenge_type)
+                            return True
+                    else:
+                        self.logger.warning(f"⏱️ {challenge_type} timeout for {username}")
+                        continue
                 
                 # Check success
                 if self._check_login_success():
@@ -182,48 +206,180 @@ class RobloxAutoLoginV6:
             
             time.sleep(2)
         
+        # All attempts failed - send notification
         self._update_status(username, "login_failed")
+        self._notify_login_failed(username)
         return False
     
-    def _check_verification(self, username):
-        """Check and wait for verification if needed"""
-        try:
-            # Common verification indicators
-            verification_selectors = [
-                "iframe[title*='arkose']",
-                "iframe[title*='captcha']",
-                "#arkose-container",
-                ".challenge-container",
-            ]
-            
-            for selector in verification_selectors:
+    def _detect_challenge_type(self):
+        """
+        Detect what type of challenge is present.
+        Returns: 'Captcha', 'Verification', 'Captcha + Verification', or None
+        """
+        captcha_present = False
+        verification_present = False
+        
+        # Captcha selectors (FunCaptcha/Arkose)
+        captcha_selectors = [
+            "iframe[title*='arkose']",
+            "iframe[title*='captcha']",
+            "iframe[src*='funcaptcha']",
+            "iframe[src*='arkoselabs']",
+            "#arkose-container",
+            "#fc-iframe-wrap",
+            "[data-testid='captcha-container']",
+        ]
+        
+        # Verification selectors (2FA, email verification, etc)
+        verification_selectors = [
+            "#two-step-verification-container",
+            ".two-step-verification",
+            "[data-testid='two-step-verification']",
+            "input[name='code']",
+            ".verification-code-input",
+            "[data-testid='verification-code']",
+            ".email-verification",
+            "#security-question-container",
+        ]
+        
+        # Check for captcha
+        for selector in captcha_selectors:
+            try:
                 elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
                 if elements and any(e.is_displayed() for e in elements):
-                    self.logger.info(f"⚠️ Verification detected for {username}")
-                    self._update_status(username, "verification")
-                    
-                    # Wait for user to solve (max 5 minutes)
-                    start = time.time()
-                    while time.time() - start < 300:
-                        time.sleep(2)
-                        # Check if verification gone
-                        still_present = False
-                        for sel in verification_selectors:
-                            els = self.driver.find_elements(By.CSS_SELECTOR, sel)
-                            if els and any(e.is_displayed() for e in els):
-                                still_present = True
-                                break
-                        
-                        if not still_present:
-                            self.logger.info(f"✅ Verification solved")
-                            return True
-                    
-                    self.logger.warning(f"⏱️ Verification timeout")
-                    return False
-            
-            return False
+                    captcha_present = True
+                    break
+            except:
+                continue
+        
+        # Check for verification
+        for selector in verification_selectors:
+            try:
+                elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                if elements and any(e.is_displayed() for e in elements):
+                    verification_present = True
+                    break
+            except:
+                continue
+        
+        # Also check page text for verification keywords
+        try:
+            page_text = self.driver.find_element(By.TAG_NAME, "body").text.lower()
+            if any(kw in page_text for kw in ['verification code', 'verify your email', 'two-step', '2-step', 'enter code']):
+                verification_present = True
         except:
-            return False
+            pass
+        
+        if captcha_present and verification_present:
+            return "Captcha + Verification"
+        elif captcha_present:
+            return "Captcha"
+        elif verification_present:
+            return "Verification"
+        
+        return None
+    
+    def _wait_for_challenge_solved(self, username, challenge_type, timeout=300):
+        """Wait for challenge to be solved manually"""
+        start = time.time()
+        check_interval = 3
+        
+        while time.time() - start < timeout:
+            time.sleep(check_interval)
+            
+            # Check if challenge is gone
+            current_challenge = self._detect_challenge_type()
+            
+            if not current_challenge:
+                return True
+            
+            # Check if login succeeded (redirected away from login)
+            if self._check_login_success():
+                return True
+            
+            # Still waiting
+            elapsed = int(time.time() - start)
+            if elapsed % 30 == 0:  # Log every 30 seconds
+                self.logger.info(f"⏳ Waiting for {challenge_type} to be solved... ({elapsed}s)")
+        
+        return False
+    
+    def _notify_manual_required(self, username, challenge_type, attempt):
+        """Send Discord notification that manual intervention is needed"""
+        try:
+            hostname = self.machine_info.get('hostname', 'Unknown')
+            
+            embed = {
+                "title": "🚨 Manual Assistance Required",
+                "description": f"**{username}** needs manual intervention",
+                "color": 0xff9900,  # Orange
+                "fields": [
+                    {"name": "Challenge Type", "value": challenge_type, "inline": True},
+                    {"name": "Attempt", "value": f"{attempt}/{self.max_login_attempts}", "inline": True},
+                    {"name": "Device", "value": hostname, "inline": True},
+                    {"name": "Action Required", "value": self._get_action_instructions(challenge_type), "inline": False},
+                ],
+                "footer": {"text": "Waiting for manual solve..."},
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            if hasattr(self, 'notifier'):
+                self.notifier.send_discord(embed=embed)
+                self.logger.info(f"📤 Notification sent for {username}")
+        except Exception as e:
+            self.logger.warning(f"Failed to send notification: {e}")
+    
+    def _get_action_instructions(self, challenge_type):
+        """Get instructions based on challenge type"""
+        if challenge_type == "Captcha":
+            return "🎯 Complete the FunCaptcha puzzle"
+        elif challenge_type == "Verification":
+            return "📧 Enter the verification code from your email/authenticator"
+        elif challenge_type == "Captcha + Verification":
+            return "🎯 Complete captcha first, then 📧 enter verification code"
+        return "⚠️ Solve the challenge manually"
+    
+    def _notify_challenge_solved(self, username, challenge_type):
+        """Send notification that challenge was solved"""
+        try:
+            embed = {
+                "title": "✅ Challenge Solved",
+                "description": f"**{username}** - {challenge_type} completed",
+                "color": 0x00ff00,  # Green
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            if hasattr(self, 'notifier'):
+                self.notifier.send_discord(embed=embed)
+        except:
+            pass
+    
+    def _notify_login_failed(self, username):
+        """Send notification that login failed after all attempts"""
+        try:
+            hostname = self.machine_info.get('hostname', 'Unknown')
+            
+            embed = {
+                "title": "❌ Login Failed",
+                "description": f"**{username}** - All {self.max_login_attempts} attempts failed",
+                "color": 0xff0000,  # Red
+                "fields": [
+                    {"name": "Device", "value": hostname, "inline": True},
+                    {"name": "Status", "value": "Skipped - needs manual login", "inline": True},
+                ],
+                "footer": {"text": "Account will be retried in next cycle"},
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            if hasattr(self, 'notifier'):
+                self.notifier.send_discord(embed=embed)
+                self.logger.info(f"📤 Login failed notification sent for {username}")
+        except Exception as e:
+            self.logger.warning(f"Failed to send notification: {e}")
+    
+    def _check_verification(self, username):
+        """Legacy method - now uses _detect_challenge_type"""
+        return self._detect_challenge_type() is not None
     
     def _check_login_success(self):
         """Check if login was successful"""
