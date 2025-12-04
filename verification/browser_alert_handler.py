@@ -315,21 +315,27 @@ class BrowserAlertHandler:
             pre_wait: Seconds to wait before checking
         
         Returns:
-            bool: True if successful
+            bool: True if successful or no dialog needed
         """
         if self._handled:
             print("⚠️ Alert already handled, skipping")
             return True
         
-        print("🔔 Waiting for protocol dialogs...")
+        print("🔔 Checking for protocol dialogs...")
         time.sleep(pre_wait)
         
         start_time = time.time()
+        dialog_found = False
         
         while time.time() - start_time < self.timeout:
             if self.handle_all_alerts():
                 print("✅ Protocol dialog handled")
                 return True
+            
+            # Check if dialog exists but wasn't handled
+            if self._find_dialog_window():
+                dialog_found = True
+            
             time.sleep(0.3)
         
         # Final attempt with Windows API
@@ -337,8 +343,13 @@ class BrowserAlertHandler:
             print("✅ Protocol dialog handled (final attempt)")
             return True
         
-        print("⚠️ No protocol dialog detected or handled")
-        return False
+        if dialog_found:
+            print("⚠️ Protocol dialog detected but could not be handled")
+            return False
+        else:
+            # No dialog = Chrome auto-allowed the protocol (good!)
+            print("✅ No dialog needed - protocol auto-allowed by Chrome")
+            return True
     
     def reset(self):
         """Reset handler state for next account."""

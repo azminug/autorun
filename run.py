@@ -85,9 +85,9 @@ class RobloxAutoLoginV6:
         """Setup Chrome with protocol auto-allow configuration"""
         options = webdriver.ChromeOptions()
         
-        # Anti-detection
+        # Anti-detection + suppress logging
         options.add_argument("--disable-blink-features=AutomationControlled")
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
         options.add_experimental_option("useAutomationExtension", False)
         
         # Performance
@@ -98,8 +98,11 @@ class RobloxAutoLoginV6:
         options.add_argument("--disable-notifications")
         options.add_argument("--disable-popup-blocking")
         
-        # Suppress console logs
+        # Suppress console logs and GPU errors
         options.add_argument("--log-level=3")
+        options.add_argument("--silent")
+        options.add_argument("--disable-logging")
+        options.add_argument("--disable-software-rasterizer")
         
         # Auto-allow protocol handlers (from v5 - critical for Bloxstrap)
         prefs = {
