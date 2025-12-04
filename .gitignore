@@ -1,0 +1,63 @@
+# ===========================
+# Python
+# ===========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+.env
+*.egg-info/
+dist/
+build/
+
+# ===========================
+# IDE
+# ===========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ===========================
+# Sensitive Files - DO NOT COMMIT
+# ===========================
+config.py
+accounts.json
+firebase_credentials.json
+*.pem
+*.key
+secrets.json
+
+# ===========================
+# Logs and Runtime
+# ===========================
+*.log
+autorun.log
+status.json
+debug/
+
+# ===========================
+# Exclude submodules/folders
+# ===========================
+website/
+roblox_heartbeat.lua
+
+# ===========================
+# OS Files
+# ===========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===========================
+# Backup files
+# ===========================
+*_backup.py
+*.backup
+*.bak

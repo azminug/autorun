@@ -1,0 +1,9 @@
+# Roblox Auto Login Bot v6 - Requirements
+
+# Core dependencies
+selenium>=4.0.0
+requests>=2.28.0
+
+# Optional - for enhanced notifications
+# Uncomment if using Firebase Admin SDK
+# firebase-admin>=6.0.0
