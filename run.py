@@ -805,6 +805,175 @@ def run_autorun_mode():
         bot.cleanup()
 
 
+def run_default_mode(accounts_file=None, server_link=None):
+    """
+    Default run mode:
+    1. Initial sync from Firebase
+    2. Process all offline accounts
+    3. Continue with persistent sync + device heartbeat
+    
+    This is the unified mode that combines initial run + continuous monitoring.
+    """
+    from services.account_sync import AccountSyncManager
+    from services.firebase_watcher import FirebaseWatcher
+    
+    print("\n" + "=" * 60)
+    print("🚀 Roblox Auto Login Bot v6.4 - UNIFIED MODE")
+    print("=" * 60)
+    print("1. Initial sync from Firebase")
+    print("2. Process offline accounts")
+    print("3. Continuous sync + monitoring")
+    print("=" * 60 + "\n")
+    
+    # Initialize components
+    sync_manager = AccountSyncManager()
+    watcher = FirebaseWatcher()
+    
+    # Create bot instance
+    bot = RobloxAutoLoginV6(
+        accounts_file=accounts_file or ACCOUNTS_FILE,
+        server_link=server_link or DEFAULT_SERVER_LINK
+    )
+    
+    bot.logger.info(f"🔑 HWID: {bot.hwid[:16]}...")
+    bot.logger.info(f"💻 Host: {bot.machine_info.get('hostname')}")
+    
+    # Mark device online
+    bot._update_device_status("online")
+    bot._log_event("device_online", None, f"Device {bot.machine_info.get('hostname')} started")
+    
+    # ========================================
+    # PHASE 1: Initial Sync
+    # ========================================
+    print("\n" + "-" * 40)
+    print("📡 PHASE 1: Initial Sync from Firebase")
+    print("-" * 40)
+    
+    active_count, inactive_count = sync_manager.sync_status_to_local()
+    print(f"   ✅ Synced: {active_count} need run, {inactive_count} already online")
+    
+    # Get accounts needing run
+    needs_run = sync_manager.get_accounts_needing_autorun()
+    
+    # ========================================
+    # PHASE 2: Process Offline Accounts
+    # ========================================
+    print("\n" + "-" * 40)
+    print(f"🎮 PHASE 2: Processing {len(needs_run)} Offline Accounts")
+    print("-" * 40)
+    
+    if needs_run:
+        for i, account in enumerate(needs_run, 1):
+            username = account.get("username", "")
+            
+            try:
+                print(f"\n[{i}/{len(needs_run)}] Processing: {username}")
+                
+                # Mark as running to prevent double-run
+                sync_manager.mark_account_running(username)
+                
+                # Run the account
+                bot.run_single_account(username)
+                
+                bot.logger.info(f"✅ Finished processing {username}")
+                
+            except KeyboardInterrupt:
+                print("\n⚠️ Interrupted by user")
+                break
+            except Exception as e:
+                bot.logger.error(f"❌ Error processing {username}: {e}")
+                continue
+        
+        print(f"\n✅ Finished processing {len(needs_run)} accounts")
+    else:
+        print("   ✅ All accounts are already online!")
+    
+    # ========================================
+    # PHASE 3: Continuous Sync + Monitoring
+    # ========================================
+    print("\n" + "-" * 40)
+    print("🔄 PHASE 3: Continuous Sync + Monitoring")
+    print("-" * 40)
+    print("   Sync interval: 60 seconds")
+    print("   Device heartbeat: 30 seconds")
+    print("   Press Ctrl+C to stop")
+    print("-" * 40 + "\n")
+    
+    # Tracking for throttling
+    last_sync_time = time.time()
+    sync_interval = 60  # seconds between syncs
+    heartbeat_interval = 30  # seconds between device heartbeats
+    last_heartbeat = time.time()
+    
+    # Track processed accounts to prevent re-run (username -> timestamp)
+    recently_processed: dict = {}
+    cooldown_time = 300  # 5 minutes cooldown per account
+    
+    try:
+        while True:
+            current_time = time.time()
+            
+            # Device heartbeat (every 30s)
+            if current_time - last_heartbeat >= heartbeat_interval:
+                bot._update_device_status("online")
+                last_heartbeat = current_time
+            
+            # Sync check (every 60s)
+            if current_time - last_sync_time >= sync_interval:
+                # Get current status without modifying local file
+                online = set(watcher.get_all_online_accounts())
+                offline = set(watcher.get_all_offline_accounts())
+                
+                # Clear expired cooldowns
+                expired = [u for u, t in list(recently_processed.items()) 
+                          if current_time - t > cooldown_time]
+                for u in expired:
+                    del recently_processed[u]
+                
+                # Find accounts that need run (offline and not recently processed)
+                needs_run_now = []
+                for username in offline:
+                    if username not in recently_processed:
+                        needs_run_now.append(username)
+                
+                bot.logger.info(
+                    f"📊 Sync: {len(online)} online, {len(offline)} offline, "
+                    f"{len(needs_run_now)} need run"
+                )
+                
+                # Process any newly offline accounts
+                if needs_run_now:
+                    bot.logger.info(f"🎯 Found {len(needs_run_now)} accounts to process")
+                    
+                    for username in needs_run_now:
+                        try:
+                            # Add to recently processed with timestamp
+                            recently_processed[username] = current_time
+                            
+                            # Sync update
+                            sync_manager.mark_account_running(username)
+                            
+                            # Run the account
+                            bot.run_single_account(username)
+                            
+                            bot.logger.info(f"✅ Auto-processed {username}")
+                            
+                        except Exception as e:
+                            bot.logger.error(f"❌ Error auto-processing {username}: {e}")
+                
+                last_sync_time = current_time
+            
+            # Sleep to prevent CPU spinning
+            time.sleep(5)
+            
+    except KeyboardInterrupt:
+        print("\n⚠️ Interrupted by user")
+        bot._log_event("device_offline", None, f"Device {bot.machine_info.get('hostname')} stopped by user")
+    finally:
+        bot.cleanup()
+        watcher.stop()
+
+
 def run_sync_mode():
     """
     Run in sync mode - sync Firebase status to local accounts.json once and exit.
@@ -868,19 +1037,19 @@ def run_watch_mode():
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Roblox Auto Login Bot v6")
+    parser = argparse.ArgumentParser(description="Roblox Auto Login Bot v6.4")
     parser.add_argument("--accounts", "-a", default=ACCOUNTS_FILE)
     parser.add_argument("--server", "-s", default=DEFAULT_SERVER_LINK)
     parser.add_argument(
         "--no-persistent",
         "-np",
         action="store_true",
-        help="Exit after processing accounts (default is persistent mode)",
+        help="Exit after processing accounts (no continuous monitoring)",
     )
     parser.add_argument(
         "--autorun",
         action="store_true",
-        help="Run in autorun mode - continuously monitor and auto-run offline accounts",
+        help="Legacy autorun mode - use queue-based processing",
     )
     parser.add_argument(
         "--sync",
@@ -892,6 +1061,11 @@ def main():
         action="store_true",
         help="Watch mode - continuously sync status but don't auto-run",
     )
+    parser.add_argument(
+        "--legacy",
+        action="store_true",
+        help="Use legacy persistent mode (old behavior)",
+    )
 
     args = parser.parse_args()
 
@@ -902,15 +1076,16 @@ def main():
         run_sync_mode()
     elif args.watch:
         run_watch_mode()
-    else:
-        # Default behavior
+    elif args.legacy:
+        # Legacy persistent mode
         bot = RobloxAutoLoginV6(accounts_file=args.accounts, server_link=args.server)
-
-        # Run persistent by default, use --no-persistent to exit after accounts
         if args.no_persistent:
             bot.run()
         else:
             bot.run_persistent()
+    else:
+        # NEW DEFAULT: Unified mode with sync + run + monitoring
+        run_default_mode(accounts_file=args.accounts, server_link=args.server)
 
 
 if __name__ == "__main__":
