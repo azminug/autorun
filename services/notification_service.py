@@ -48,9 +48,13 @@ class NotificationService:
         self.discord_enabled = bool(self.discord_webhook and 'discord' in self.discord_webhook)
         self.telegram_enabled = bool(self.telegram_token and self.telegram_chat_id)
         self.whatsapp_enabled = bool(self.whatsapp_url and self.whatsapp_key)
+        
+        # Track webhook status
+        self._discord_working = None  # None = not tested, True/False = tested result
+        self._last_discord_error = None
     
     def _make_request(self, url, data, headers=None):
-        """Make HTTP POST request"""
+        """Make HTTP POST request with better error handling"""
         try:
             if headers is None:
                 headers = {'Content-Type': 'application/json'}
@@ -59,8 +63,18 @@ class NotificationService:
             
             with urlopen(request, timeout=10) as response:
                 return True, response.read().decode('utf-8')
-        except (URLError, HTTPError) as e:
-            return False, str(e)
+        except HTTPError as e:
+            # Handle specific HTTP errors
+            error_msg = f"HTTP Error {e.code}: {e.reason}"
+            if e.code == 403:
+                error_msg = "403 Forbidden - Check webhook URL or permissions"
+            elif e.code == 404:
+                error_msg = "404 Not Found - Webhook URL may be invalid"
+            elif e.code == 429:
+                error_msg = "429 Rate Limited - Too many requests"
+            return False, error_msg
+        except URLError as e:
+            return False, f"URL Error: {e.reason}"
         except Exception as e:
             return False, str(e)
     
@@ -94,9 +108,47 @@ class NotificationService:
         success, result = self._make_request(self.discord_webhook, data)
         
         if not success:
-            print(f"⚠️ Discord notification failed: {result}")
+            self._discord_working = False
+            self._last_discord_error = result
+            # Only print warning once per error type or if error changed
+            if self._last_discord_error != result:
+                print(f"⚠️ Discord notification failed: {result}")
+        else:
+            self._discord_working = True
+            self._last_discord_error = None
         
         return success
+    
+    def validate_discord_webhook(self):
+        """
+        Validate Discord webhook is working.
+        Sends a test request to check if webhook is valid.
+        
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        if not self.discord_enabled:
+            return False, "Discord webhook not configured"
+        
+        # Try to get webhook info (GET request)
+        try:
+            from urllib.request import urlopen
+            with urlopen(self.discord_webhook, timeout=10) as response:
+                if response.status == 200:
+                    self._discord_working = True
+                    return True, None
+        except HTTPError as e:
+            if e.code == 401:
+                return False, "401 Unauthorized - Invalid webhook token"
+            elif e.code == 403:
+                return False, "403 Forbidden - Webhook may be deleted or regenerated"
+            elif e.code == 404:
+                return False, "404 Not Found - Webhook does not exist"
+            return False, f"HTTP {e.code}: {e.reason}"
+        except Exception as e:
+            return False, str(e)
+        
+        return False, "Unknown error"
     
     def send_discord_embed(self, title, description, color=0x00ff00, fields=None, footer=None):
         """
