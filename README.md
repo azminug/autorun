@@ -1,4 +1,4 @@
-# Roblox Auto Login Bot v6
+# Roblox Auto Login Bot v6.3
 
 Automated Roblox account management and monitoring system with Firebase integration.
 
