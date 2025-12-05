@@ -1,11 +1,12 @@
 """
-Roblox Auto Login Bot v6
-========================
+Roblox Auto Login Bot v6.5
+==========================
 Simplified architecture:
 - Removed PID detection (handled by roblox_heartbeat.lua)
 - No double instance launch
 - Clean browser automation
 - Firebase-driven monitoring
+- RAM optimization for multi-instance (24/7)
 """
 
 import time
@@ -805,24 +806,27 @@ def run_autorun_mode():
         bot.cleanup()
 
 
-def run_default_mode(accounts_file=None, server_link=None):
+def run_default_mode(accounts_file=None, server_link=None, enable_ram_optimizer=True):
     """
     Default run mode:
     1. Initial sync from Firebase
     2. Process all offline accounts
-    3. Continue with persistent sync + device heartbeat
+    3. Continuous sync + monitoring
+    4. RAM optimization (background)
     
     This is the unified mode that combines initial run + continuous monitoring.
     """
     from services.account_sync import AccountSyncManager
     from services.firebase_watcher import FirebaseWatcher
+    from services.ram_optimizer import get_ram_optimizer, RamOptimizerConfig
     
     print("\n" + "=" * 60)
-    print("🚀 Roblox Auto Login Bot v6.4 - UNIFIED MODE")
+    print("🚀 Roblox Auto Login Bot v6.5 - UNIFIED MODE")
     print("=" * 60)
     print("1. Initial sync from Firebase")
     print("2. Process offline accounts")
     print("3. Continuous sync + monitoring")
+    print("4. RAM optimization (background)" if enable_ram_optimizer else "4. RAM optimization (disabled)")
     print("=" * 60 + "\n")
     
     # Initialize components
@@ -837,6 +841,25 @@ def run_default_mode(accounts_file=None, server_link=None):
     
     bot.logger.info(f"🔑 HWID: {bot.hwid[:16]}...")
     bot.logger.info(f"💻 Host: {bot.machine_info.get('hostname')}")
+    
+    # Initialize RAM optimizer
+    ram_optimizer = None
+    if enable_ram_optimizer:
+        try:
+            ram_config = RamOptimizerConfig(
+                max_instances=20,
+                check_interval_seconds=300,  # Check every 5 minutes
+                ram_threshold_percent=85.0,  # Start optimization at 85%
+                aggressive_threshold_percent=92.0,  # Aggressive at 92%
+                working_set_limit_mb=512,
+                min_working_set_mb=128,
+                safe_mode=True,
+                process_priority="below_normal"
+            )
+            ram_optimizer = get_ram_optimizer(ram_config)
+            bot.logger.info(f"🧠 RAM Optimizer: enabled (threshold {ram_config.ram_threshold_percent}%)")
+        except Exception as e:
+            bot.logger.warning(f"⚠️ RAM Optimizer failed to initialize: {e}")
     
     # Mark device online
     bot._update_device_status("online")
@@ -896,8 +919,14 @@ def run_default_mode(accounts_file=None, server_link=None):
     print("-" * 40)
     print("   Sync interval: 60 seconds")
     print("   Device heartbeat: 30 seconds")
+    print("   RAM check: 300 seconds")
     print("   Press Ctrl+C to stop")
     print("-" * 40 + "\n")
+    
+    # Start RAM optimizer background monitoring
+    if ram_optimizer and ram_optimizer.enabled:
+        ram_optimizer.start_monitoring()
+        bot.logger.info("🧠 RAM optimizer monitoring started")
     
     # Tracking for throttling
     last_sync_time = time.time()
@@ -970,6 +999,15 @@ def run_default_mode(accounts_file=None, server_link=None):
         print("\n⚠️ Interrupted by user")
         bot._log_event("device_offline", None, f"Device {bot.machine_info.get('hostname')} stopped by user")
     finally:
+        # Stop RAM optimizer
+        if ram_optimizer:
+            ram_optimizer.stop_monitoring()
+            stats = ram_optimizer.stats
+            bot.logger.info(
+                f"🧠 RAM optimizer stats: {stats['optimizations']} optimizations, "
+                f"{stats['total_saved_mb']:.1f} MB saved"
+            )
+        
         bot.cleanup()
         watcher.stop()
 
@@ -1034,10 +1072,86 @@ def run_watch_mode():
         manager.stop_auto_sync()
 
 
+def run_ram_status():
+    """Show RAM optimizer status and Roblox processes"""
+    from services.ram_optimizer import get_ram_optimizer, RamOptimizerConfig
+    
+    print("\n" + "=" * 60)
+    print("🧠 Roblox RAM Optimizer - Status")
+    print("=" * 60)
+    
+    config = RamOptimizerConfig(
+        ram_threshold_percent=85.0,
+        aggressive_threshold_percent=92.0
+    )
+    optimizer = get_ram_optimizer(config)
+    
+    if not optimizer.enabled:
+        print("\n⚠️ RAM Optimizer is disabled (psutil not installed)")
+        print("   Install with: pip install psutil")
+        return
+    
+    optimizer.print_status()
+    
+    # Show process list
+    processes = optimizer.get_roblox_processes()
+    if processes:
+        print("\n🎮 Roblox Processes:")
+        print("-" * 50)
+        print(f"{'PID':<10} {'RAM (MB)':<12} {'CPU %':<10} {'Priority'}")
+        print("-" * 50)
+        for p in sorted(processes, key=lambda x: x.ram_mb, reverse=True):
+            print(f"{p.pid:<10} {p.ram_mb:<12.1f} {p.cpu_percent:<10.1f} {p.priority}")
+        print("-" * 50)
+        print(f"Total: {sum(p.ram_mb for p in processes):.1f} MB across {len(processes)} instances")
+    else:
+        print("\n📭 No Roblox processes running")
+    
+    print("\n" + "=" * 60)
+
+
+def run_ram_optimize():
+    """Force RAM optimization now"""
+    from services.ram_optimizer import get_ram_optimizer, RamOptimizerConfig
+    
+    print("\n" + "=" * 60)
+    print("🧠 Roblox RAM Optimizer - Force Optimization")
+    print("=" * 60)
+    
+    config = RamOptimizerConfig(
+        ram_threshold_percent=0,  # Force optimization regardless of usage
+        safe_mode=True
+    )
+    optimizer = get_ram_optimizer(config)
+    
+    if not optimizer.enabled:
+        print("\n⚠️ RAM Optimizer is disabled (psutil not installed)")
+        return
+    
+    print("\n🔧 Running optimization...")
+    result = optimizer.optimize_all(force=True)
+    
+    if result.get("optimized"):
+        print(f"\n✅ Optimization complete!")
+        print(f"   Instances: {result.get('instance_count', 0)}")
+        print(f"   Total Roblox RAM: {result.get('total_roblox_mb', 0):.1f} MB")
+        print(f"   RAM saved: {result.get('total_saved_mb', 0):.1f} MB")
+        
+        if result.get("results"):
+            print("\n   Per-process results:")
+            for r in result["results"]:
+                status = "✅" if r.get("success") else "❌"
+                print(f"   {status} PID {r.get('pid')}: {r.get('before_mb', 0):.1f} → {r.get('after_mb', 0):.1f} MB")
+    else:
+        print(f"\n📊 {result.get('message', 'No optimization needed')}")
+    
+    print("\n" + "=" * 60)
+
+
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Roblox Auto Login Bot v6.4")
+    parser = argparse.ArgumentParser(description="Roblox Auto Login Bot v6.5")
     parser.add_argument("--accounts", "-a", default=ACCOUNTS_FILE)
     parser.add_argument("--server", "-s", default=DEFAULT_SERVER_LINK)
     parser.add_argument(
@@ -1066,11 +1180,30 @@ def main():
         action="store_true",
         help="Use legacy persistent mode (old behavior)",
     )
+    parser.add_argument(
+        "--ram-status",
+        action="store_true",
+        help="Show RAM optimizer status and Roblox processes",
+    )
+    parser.add_argument(
+        "--ram-optimize",
+        action="store_true",
+        help="Force RAM optimization now",
+    )
+    parser.add_argument(
+        "--no-ram-optimizer",
+        action="store_true",
+        help="Disable RAM optimizer in unified mode",
+    )
 
     args = parser.parse_args()
 
     # Handle different modes
-    if args.autorun:
+    if args.ram_status:
+        run_ram_status()
+    elif args.ram_optimize:
+        run_ram_optimize()
+    elif args.autorun:
         run_autorun_mode()
     elif args.sync:
         run_sync_mode()
@@ -1084,8 +1217,12 @@ def main():
         else:
             bot.run_persistent()
     else:
-        # NEW DEFAULT: Unified mode with sync + run + monitoring
-        run_default_mode(accounts_file=args.accounts, server_link=args.server)
+        # NEW DEFAULT: Unified mode with sync + run + monitoring + RAM optimization
+        run_default_mode(
+            accounts_file=args.accounts, 
+            server_link=args.server,
+            enable_ram_optimizer=not args.no_ram_optimizer
+        )
 
 
 if __name__ == "__main__":
