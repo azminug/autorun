@@ -1,10 +1,17 @@
 """Notification Service for Discord, Telegram, and WhatsApp webhooks"""
 import json
-from urllib.request import Request, urlopen
-from urllib.error import URLError, HTTPError
 from datetime import datetime
 import sys
 import os
+
+# Try to use requests library (more reliable), fallback to urllib
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    from urllib.request import Request, urlopen
+    from urllib.error import URLError, HTTPError
+    HAS_REQUESTS = False
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
@@ -55,28 +62,38 @@ class NotificationService:
     
     def _make_request(self, url, data, headers=None):
         """Make HTTP POST request with better error handling"""
-        try:
-            if headers is None:
-                headers = {'Content-Type': 'application/json'}
-            
-            request = Request(url, data=json.dumps(data).encode('utf-8'), headers=headers)
-            
-            with urlopen(request, timeout=10) as response:
-                return True, response.read().decode('utf-8')
-        except HTTPError as e:
-            # Handle specific HTTP errors
-            error_msg = f"HTTP Error {e.code}: {e.reason}"
-            if e.code == 403:
-                error_msg = "403 Forbidden - Check webhook URL or permissions"
-            elif e.code == 404:
-                error_msg = "404 Not Found - Webhook URL may be invalid"
-            elif e.code == 429:
-                error_msg = "429 Rate Limited - Too many requests"
-            return False, error_msg
-        except URLError as e:
-            return False, f"URL Error: {e.reason}"
-        except Exception as e:
-            return False, str(e)
+        if headers is None:
+            headers = {'Content-Type': 'application/json'}
+        
+        # Use requests library if available (handles 204 properly)
+        if HAS_REQUESTS:
+            try:
+                response = requests.post(url, json=data, headers=headers, timeout=10)
+                # Discord returns 204 No Content on success
+                if response.status_code in [200, 201, 204]:
+                    return True, ""
+                else:
+                    return False, f"HTTP {response.status_code}: {response.text}"
+            except requests.exceptions.Timeout:
+                return False, "Request timeout"
+            except requests.exceptions.RequestException as e:
+                return False, str(e)
+        else:
+            # Fallback to urllib
+            try:
+                request = Request(url, data=json.dumps(data).encode('utf-8'), headers=headers)
+                with urlopen(request, timeout=10) as response:
+                    return True, response.read().decode('utf-8')
+            except HTTPError as e:
+                # Discord returns 204 which urllib treats as success
+                if e.code == 204:
+                    return True, ""
+                error_msg = f"HTTP Error {e.code}: {e.reason}"
+                return False, error_msg
+            except URLError as e:
+                return False, f"URL Error: {e.reason}"
+            except Exception as e:
+                return False, str(e)
     
     # ===========================
     # DISCORD

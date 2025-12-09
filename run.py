@@ -651,14 +651,41 @@ class RobloxAutoLoginV6:
     def _hard_refresh(self):
         """Perform hard refresh (Ctrl+Shift+R) to bypass captcha"""
         try:
-            from selenium.webdriver.common.action_chains import ActionChains
-            actions = ActionChains(self.driver)
-            actions.key_down(Keys.CONTROL).key_down(Keys.SHIFT).send_keys('r').key_up(Keys.SHIFT).key_up(Keys.CONTROL).perform()
-            self.logger.info("🔄 Hard refresh performed (Ctrl+Shift+R)")
-        except Exception as e:
-            self.logger.debug(f"ActionChains failed: {e}, using JS reload")
-            # Fallback: execute refresh via JS
-            self.driver.execute_script("location.reload(true);")
+            # Method 1: Use JavaScript to clear cache and reload
+            # This is more reliable than keyboard shortcuts
+            self.driver.execute_script("""
+                // Clear session storage
+                try { sessionStorage.clear(); } catch(e) {}
+                // Clear local storage for this domain
+                try { localStorage.clear(); } catch(e) {}
+                // Hard reload - bypass cache
+                location.reload(true);
+            """)
+            self.logger.info("🔄 Hard refresh performed (JS reload + clear storage)")
+            return True
+        except Exception as e1:
+            try:
+                # Method 2: Navigate with cache bypass
+                current_url = self.driver.current_url
+                self.driver.execute_script(f"window.location.replace('{current_url}');")
+                self.logger.info("🔄 Hard refresh performed (location.replace)")
+                return True
+            except Exception as e2:
+                try:
+                    # Method 3: ActionChains keyboard shortcut
+                    from selenium.webdriver.common.action_chains import ActionChains
+                    # Focus on body first
+                    body = self.driver.find_element(By.TAG_NAME, "body")
+                    body.click()
+                    actions = ActionChains(self.driver)
+                    actions.key_down(Keys.CONTROL).key_down(Keys.SHIFT).send_keys('r').key_up(Keys.SHIFT).key_up(Keys.CONTROL).perform()
+                    self.logger.info("🔄 Hard refresh performed (Ctrl+Shift+R)")
+                    return True
+                except Exception as e3:
+                    # Method 4: Simple refresh as last resort
+                    self.driver.refresh()
+                    self.logger.info("🔄 Refresh performed (fallback)")
+                    return True
     
     def _check_pow_verifying(self):
         """
