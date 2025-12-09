@@ -1,5 +1,5 @@
 """
-Roblox Auto Login Bot v6.6
+Roblox Auto Login Bot v6.7
 ==========================
 Features:
 - Firebase sync + continuous monitoring
@@ -8,6 +8,8 @@ Features:
 - Window minimize after launch
 - Timeout/2FA/Captcha Discord webhooks
 - Lowercase username normalization
+- Stealth mode: Browser fingerprint evasion
+- Human-like delays to reduce captcha
 """
 
 import time
@@ -15,6 +17,7 @@ import sys
 import os
 import atexit
 import ctypes
+import random
 from datetime import datetime
 
 # Selenium imports
@@ -33,6 +36,20 @@ from utils.logger import get_logger
 from firebase.firebase_client import get_firebase_client
 from verification.verification_handler import VerificationHandler
 from verification.browser_alert_handler import BrowserAlertHandler
+
+
+def human_delay(min_sec=0.5, max_sec=2.0):
+    """Random delay to simulate human behavior"""
+    delay = random.uniform(min_sec, max_sec)
+    time.sleep(delay)
+    return delay
+
+
+def human_typing(element, text, min_delay=0.05, max_delay=0.15):
+    """Type text with human-like delays between keystrokes"""
+    for char in text:
+        element.send_keys(char)
+        time.sleep(random.uniform(min_delay, max_delay))
 
 
 # ============================================
@@ -133,17 +150,28 @@ class RobloxAutoLoginV6:
             return []
 
     def setup_driver(self):
-        """Setup Chrome with protocol auto-allow configuration"""
+        """Setup Chrome with stealth configuration to reduce captcha frequency"""
         options = webdriver.ChromeOptions()
 
-        # Anti-detection + suppress logging
+        # ============================================
+        # ANTI-DETECTION / STEALTH MODE
+        # ============================================
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_experimental_option(
             "excludeSwitches", ["enable-automation", "enable-logging"]
         )
         options.add_experimental_option("useAutomationExtension", False)
+        
+        # Realistic window size (not default selenium size)
+        options.add_argument("--window-size=1366,768")
+        
+        # Use a common user-agent to blend in
+        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        options.add_argument(f"--user-agent={user_agent}")
 
-        # Performance
+        # ============================================
+        # PERFORMANCE & STABILITY
+        # ============================================
         options.add_argument("--disable-gpu")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
@@ -156,8 +184,27 @@ class RobloxAutoLoginV6:
         options.add_argument("--silent")
         options.add_argument("--disable-logging")
         options.add_argument("--disable-software-rasterizer")
+        
+        # ============================================
+        # FINGERPRINT EVASION
+        # ============================================
+        # Disable WebRTC IP leak
+        options.add_argument("--disable-webrtc")
+        options.add_argument("--enforce-webrtc-ip-permission-check")
+        
+        # Disable features that expose automation
+        options.add_argument("--disable-extensions")
+        options.add_argument("--disable-plugins-discovery")
+        options.add_argument("--disable-bundled-ppapi-flash")
+        
+        # Make browser look more "lived-in"
+        options.add_argument("--disable-background-networking")
+        options.add_argument("--disable-sync")
+        options.add_argument("--disable-translate")
+        options.add_argument("--metrics-recording-only")
+        options.add_argument("--no-first-run")
 
-        # Auto-allow protocol handlers (from v5 - critical for Bloxstrap)
+        # Auto-allow protocol handlers (critical for Bloxstrap)
         prefs = {
             # Auto-allow roblox-player protocol
             "protocol_handler.allowed_origin_protocol_pairs": {
@@ -170,13 +217,21 @@ class RobloxAutoLoginV6:
             "safebrowsing.enabled": False,
             # Allow external apps without asking
             "external_protocol_dialog.show_always_open_checkbox": True,
+            # Additional stealth prefs
+            "credentials_enable_service": False,
+            "profile.password_manager_enabled": False,
+            "profile.default_content_setting_values.notifications": 2,
+            "download.prompt_for_download": False,
+            "download.default_directory": os.path.join(os.environ.get("TEMP", "C:\\Temp"), "roblox_downloads"),
         }
         options.add_experimental_option("prefs", prefs)
 
         self.driver = webdriver.Chrome(options=options)
-        self.driver.execute_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-        )
+        
+        # ============================================
+        # JAVASCRIPT STEALTH INJECTION
+        # ============================================
+        self._inject_stealth_scripts()
 
         # Initialize alert handler for protocol dialogs
         self.alert_handler = BrowserAlertHandler(self.driver)
@@ -186,10 +241,93 @@ class RobloxAutoLoginV6:
 
         self.notifier = NotificationService()
 
-        self.logger.info("🌐 Browser ready")
+        self.logger.info("🌐 Browser ready (stealth mode)")
+    
+    def _inject_stealth_scripts(self):
+        """Inject JavaScript to evade bot detection"""
+        stealth_js = """
+        // Hide webdriver property
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        
+        // Override plugins to look real
+        Object.defineProperty(navigator, 'plugins', {
+            get: () => [
+                {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer'},
+                {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai'},
+                {name: 'Native Client', filename: 'internal-nacl-plugin'}
+            ]
+        });
+        
+        // Override languages
+        Object.defineProperty(navigator, 'languages', {
+            get: () => ['en-US', 'en', 'id']
+        });
+        
+        // Fix permissions API
+        const originalQuery = window.navigator.permissions.query;
+        window.navigator.permissions.query = (parameters) => (
+            parameters.name === 'notifications' ?
+                Promise.resolve({ state: Notification.permission }) :
+                originalQuery(parameters)
+        );
+        
+        // Override chrome object
+        window.chrome = {
+            runtime: {},
+            loadTimes: function() {},
+            csi: function() {},
+            app: {}
+        };
+        
+        // Override connection rtt
+        Object.defineProperty(navigator, 'connection', {
+            get: () => ({
+                rtt: 50,
+                downlink: 10,
+                effectiveType: '4g',
+                saveData: false
+            })
+        });
+        
+        // Canvas fingerprint randomization
+        const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+        HTMLCanvasElement.prototype.toDataURL = function(type) {
+            if (type === 'image/png' && this.width === 220 && this.height === 30) {
+                // Arkose fingerprint canvas - add slight noise
+                const ctx = this.getContext('2d');
+                const imageData = ctx.getImageData(0, 0, this.width, this.height);
+                for (let i = 0; i < imageData.data.length; i += 4) {
+                    imageData.data[i] = imageData.data[i] ^ (Math.random() > 0.99 ? 1 : 0);
+                }
+                ctx.putImageData(imageData, 0, 0);
+            }
+            return originalToDataURL.apply(this, arguments);
+        };
+        
+        // WebGL fingerprint spoofing
+        const getParameterOriginal = WebGLRenderingContext.prototype.getParameter;
+        WebGLRenderingContext.prototype.getParameter = function(parameter) {
+            if (parameter === 37445) return 'Intel Inc.';
+            if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+            return getParameterOriginal.apply(this, arguments);
+        };
+        
+        console.log('[Stealth] Anti-detection scripts loaded');
+        """
+        
+        try:
+            self.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": stealth_js})
+            self.logger.debug("Stealth scripts injected via CDP")
+        except Exception as e:
+            # Fallback: inject directly
+            try:
+                self.driver.execute_script(stealth_js)
+                self.logger.debug("Stealth scripts injected directly")
+            except:
+                self.logger.warning(f"Could not inject stealth scripts: {e}")
 
     def login_roblox(self, username, password):
-        """Login to Roblox with captcha/verification detection"""
+        """Login to Roblox with captcha/verification detection and human-like behavior"""
         self.logger.info(f"🔐 Logging in: {username}")
 
         # Update Firebase
@@ -198,28 +336,34 @@ class RobloxAutoLoginV6:
         for attempt in range(1, self.max_login_attempts + 1):
             try:
                 self.driver.get("https://www.roblox.com/login")
-                time.sleep(2)
+                human_delay(1.5, 3.0)  # Human-like wait for page load
                 
                 # Check for "Verifying browser" POW check and bypass
                 self._bypass_verifying_browser()
 
-                # Fill credentials
+                # Fill credentials with human-like typing
                 user_field = WebDriverWait(self.driver, 10).until(
                     EC.presence_of_element_located((By.ID, "login-username"))
                 )
                 user_field.clear()
-                user_field.send_keys(username)
+                human_delay(0.3, 0.8)  # Small delay before typing
+                human_typing(user_field, username)  # Type like a human
+                
+                human_delay(0.5, 1.2)  # Delay between fields
 
                 pass_field = self.driver.find_element(By.ID, "login-password")
                 pass_field.clear()
-                pass_field.send_keys(password)
+                human_delay(0.2, 0.5)
+                human_typing(pass_field, password)  # Type password like a human
+                
+                human_delay(0.8, 1.5)  # Delay before clicking
 
                 # Click login
                 self.driver.find_element(By.ID, "login-button").click()
                 self.logger.info(f"   Attempt {attempt}: Submitted")
 
                 # Wait for redirect or error
-                time.sleep(3)
+                human_delay(2.5, 4.0)
                 
                 # Check for "Verifying browser" POW check after submit
                 self._bypass_verifying_browser()
@@ -1047,7 +1191,7 @@ def run_default_mode(accounts_file=None, server_link=None, enable_ram_optimizer=
     from services.ram_optimizer import get_ram_optimizer, RamOptimizerConfig
 
     print("\n" + "=" * 60)
-    print("🚀 Roblox Auto Login Bot v6.6 - UNIFIED MODE")
+    print("🚀 Roblox Auto Login Bot v6.7 - UNIFIED MODE (Stealth)")
     print("=" * 60)
     print("1. Initial sync from Firebase")
     print("2. Process offline accounts")
@@ -1415,7 +1559,7 @@ def run_ram_optimize():
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Roblox Auto Login Bot v6.6")
+    parser = argparse.ArgumentParser(description="Roblox Auto Login Bot v6.7 (Stealth Mode)")
     parser.add_argument("--accounts", "-a", default=ACCOUNTS_FILE)
     parser.add_argument("--server", "-s", default=DEFAULT_SERVER_LINK)
     parser.add_argument(
