@@ -487,11 +487,21 @@ class RobloxAutoLoginV6:
             self.driver.get(self.server_link)
             time.sleep(2)
             
-            # Check for "Verifying browser" captcha page
+            # Check and bypass "Verifying browser" with retry loop
+            max_verify_attempts = 5
+            for attempt in range(max_verify_attempts):
+                if self._check_verifying_browser():
+                    self.logger.info(f"🔄 Detected 'Verifying browser' (attempt {attempt + 1}/{max_verify_attempts}) - performing hard refresh")
+                    self._hard_refresh()
+                    time.sleep(3)
+                else:
+                    break
+            
+            # Final check - if still verifying, try full page reload
             if self._check_verifying_browser():
-                self.logger.info("🔄 Detected 'Verifying browser' - performing hard refresh")
-                self._hard_refresh()
-                time.sleep(3)
+                self.logger.warning("⚠️ Still verifying after retries, trying full reload")
+                self.driver.refresh()
+                time.sleep(5)
             
             # Wait for page load
             WebDriverWait(self.driver, 15).until(
@@ -523,15 +533,30 @@ class RobloxAutoLoginV6:
     def _check_verifying_browser(self):
         """Check if page shows 'Verifying browser' captcha"""
         try:
+            # Method 1: Check for #text-loading element with "Verifying"
+            try:
+                loading_el = self.driver.find_element(By.ID, "text-loading")
+                if loading_el.is_displayed():
+                    text = loading_el.text.lower()
+                    if "verifying" in text or "checking" in text:
+                        self.logger.debug(f"Found verifying text in #text-loading: {text}")
+                        return True
+            except:
+                pass
+            
+            # Method 2: Check page source
             page_source = self.driver.page_source.lower()
             if "verifying browser" in page_source or "checking your browser" in page_source:
                 return True
             
-            # Check for loading screen with verification
-            loading_elements = self.driver.find_elements(By.CSS_SELECTOR, ".screen.loading, .verification-screen")
+            # Method 3: Check for loading/verification screens
+            loading_elements = self.driver.find_elements(By.CSS_SELECTOR, ".loading, .verification-screen, .challenge-container, [class*='captcha']")
             for el in loading_elements:
-                if el.is_displayed() and "verifying" in el.text.lower():
-                    return True
+                try:
+                    if el.is_displayed() and ("verifying" in el.text.lower() or "checking" in el.text.lower()):
+                        return True
+                except:
+                    pass
         except:
             pass
         return False
@@ -542,8 +567,9 @@ class RobloxAutoLoginV6:
             from selenium.webdriver.common.action_chains import ActionChains
             actions = ActionChains(self.driver)
             actions.key_down(Keys.CONTROL).key_down(Keys.SHIFT).send_keys('r').key_up(Keys.SHIFT).key_up(Keys.CONTROL).perform()
-            self.logger.info("🔄 Hard refresh performed")
-        except:
+            self.logger.info("🔄 Hard refresh performed (Ctrl+Shift+R)")
+        except Exception as e:
+            self.logger.debug(f"ActionChains failed: {e}, using JS reload")
             # Fallback: execute refresh via JS
             self.driver.execute_script("location.reload(true);")
     
