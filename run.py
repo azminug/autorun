@@ -15,7 +15,7 @@ import sys
 import os
 import atexit
 import ctypes
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Selenium imports
 from selenium import webdriver
@@ -327,9 +327,20 @@ class RobloxAutoLoginV6:
     
     def _notify_captcha_bypass_failed(self, username, challenge_type, attempt):
         """Send Discord webhook when captcha bypass fails and needs manual assist"""
+        hostname = self.machine_info.get("hostname", "Unknown")
+        
+        # Always print to console for visibility
+        print(f"\n{'='*50}")
+        print(f"🤖 CAPTCHA BYPASS FAILED - MANUAL REQUIRED")
+        print(f"{'='*50}")
+        print(f"  Username: {username}")
+        print(f"  Challenge: {challenge_type}")
+        print(f"  Device: {hostname}")
+        print(f"  Attempt: {attempt}")
+        print(f"  Status: Waiting for manual solve (5 min timeout)")
+        print(f"{'='*50}\n")
+        
         try:
-            hostname = self.machine_info.get("hostname", "Unknown")
-            
             embed = {
                 "title": "🤖 Captcha Bypass FAILED - Manual Required",
                 "description": f"**{username}** needs manual captcha solving",
@@ -340,7 +351,7 @@ class RobloxAutoLoginV6:
                     {"name": "Attempt", "value": str(attempt), "inline": True},
                     {"name": "Status", "value": "⏳ Waiting for manual solve (5 min timeout)", "inline": False},
                 ],
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "footer": {"text": "Roblox Auto Login Bot v6.8"}
             }
             
@@ -349,12 +360,12 @@ class RobloxAutoLoginV6:
                 if result:
                     self.logger.info(f"📤 Webhook sent: Captcha bypass failed for {username}")
                 else:
-                    self.logger.warning("Webhook send returned False - check Discord config")
+                    self.logger.warning("⚠️ Discord webhook failed - check config.py DISCORD_WEBHOOK_URL")
             else:
-                self.logger.warning("Notifier not available for webhook")
+                self.logger.warning("Notifier not available")
                 
         except Exception as e:
-            self.logger.error(f"Failed to send captcha bypass webhook: {e}")
+            self.logger.error(f"Webhook error: {e}")
 
     def _detect_challenge_type(self):
         """
