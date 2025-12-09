@@ -1,18 +1,20 @@
 """
-Roblox Auto Login Bot v6.5
+Roblox Auto Login Bot v6.6
 ==========================
-Simplified architecture:
-- Removed PID detection (handled by roblox_heartbeat.lua)
-- No double instance launch
-- Clean browser automation
-- Firebase-driven monitoring
+Features:
+- Firebase sync + continuous monitoring
 - RAM optimization for multi-instance (24/7)
+- Verifying browser bypass (hard refresh)
+- Window minimize after launch
+- Timeout/2FA/Captcha Discord webhooks
+- Lowercase username normalization
 """
 
 import time
 import sys
 import os
 import atexit
+import ctypes
 from datetime import datetime
 
 # Selenium imports
@@ -21,6 +23,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
+from selenium.webdriver.common.keys import Keys
 
 # Local imports
 from config import ACCOUNTS_FILE, DEFAULT_SERVER_LINK, MAX_LOGIN_ATTEMPTS
@@ -30,6 +33,53 @@ from utils.logger import get_logger
 from firebase.firebase_client import get_firebase_client
 from verification.verification_handler import VerificationHandler
 from verification.browser_alert_handler import BrowserAlertHandler
+
+
+# ============================================
+# WINDOW MANAGEMENT (Windows API)
+# ============================================
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+
+if sys.platform == 'win32':
+    user32 = ctypes.windll.user32
+    SW_MINIMIZE = 6
+    SW_HIDE = 0
+    
+    def minimize_roblox_windows():
+        """Minimize all Roblox windows"""
+        if not PSUTIL_AVAILABLE:
+            return 0
+        
+        minimized = 0
+        for proc in psutil.process_iter(['pid', 'name']):
+            try:
+                if 'roblox' in proc.info['name'].lower():
+                    # Find and minimize window
+                    def enum_callback(hwnd, lparam):
+                        nonlocal minimized
+                        try:
+                            pid = ctypes.c_ulong()
+                            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                            if pid.value == proc.info['pid']:
+                                if user32.IsWindowVisible(hwnd):
+                                    user32.ShowWindow(hwnd, SW_MINIMIZE)
+                                    minimized += 1
+                        except:
+                            pass
+                        return True
+                    
+                    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+                    user32.EnumWindows(WNDENUMPROC(enum_callback), 0)
+            except:
+                continue
+        return minimized
+else:
+    def minimize_roblox_windows():
+        return 0
 
 
 class RobloxAutoLoginV6:
@@ -431,12 +481,18 @@ class RobloxAutoLoginV6:
     def join_server(self, username):
         """Navigate to server link - Roblox launches automatically"""
         self.logger.info(f"🎮 Opening server link for {username}")
-        self._update_status(username, "joining")
+        self._update_status(username.lower(), "joining")
 
         try:
             self.driver.get(self.server_link)
-            time.sleep(3)
-
+            time.sleep(2)
+            
+            # Check for "Verifying browser" captcha page
+            if self._check_verifying_browser():
+                self.logger.info("🔄 Detected 'Verifying browser' - performing hard refresh")
+                self._hard_refresh()
+                time.sleep(3)
+            
             # Wait for page load
             WebDriverWait(self.driver, 15).until(
                 lambda d: d.execute_script("return document.readyState") == "complete"
@@ -444,26 +500,93 @@ class RobloxAutoLoginV6:
 
             # Click play button to trigger roblox-player protocol
             if self._click_play_button():
-                self.logger.info(
-                    f"✅ Play button clicked - waiting for protocol dialog"
-                )
+                self.logger.info(f"✅ Play button clicked - launching Roblox")
 
-                # Handle browser protocol dialog (v5 behavior restored)
-                # This allows "Open roblox-player?" popup
+                # Handle browser protocol dialog
                 if hasattr(self, "alert_handler") and self.alert_handler:
-                    self.alert_handler.reset()  # Reset for new account
+                    self.alert_handler.reset()
                     self.alert_handler.wait_and_handle(pre_wait=2)
 
-                self._update_status(username, "launched")
-                self._log_event("launch", username, "Roblox protocol triggered")
+                self._update_status(username.lower(), "launched")
+                self._log_event("launch", username.lower(), "Roblox launched successfully")
                 return True
             else:
                 self.logger.warning(f"⚠️ Could not click play button")
+                self._notify_error(username, "Could not click play button")
                 return False
 
         except Exception as e:
             self.logger.error(f"Join server failed: {e}")
+            self._notify_error(username, f"Join server failed: {e}")
             return False
+    
+    def _check_verifying_browser(self):
+        """Check if page shows 'Verifying browser' captcha"""
+        try:
+            page_source = self.driver.page_source.lower()
+            if "verifying browser" in page_source or "checking your browser" in page_source:
+                return True
+            
+            # Check for loading screen with verification
+            loading_elements = self.driver.find_elements(By.CSS_SELECTOR, ".screen.loading, .verification-screen")
+            for el in loading_elements:
+                if el.is_displayed() and "verifying" in el.text.lower():
+                    return True
+        except:
+            pass
+        return False
+    
+    def _hard_refresh(self):
+        """Perform hard refresh (Ctrl+Shift+R) to bypass captcha"""
+        try:
+            from selenium.webdriver.common.action_chains import ActionChains
+            actions = ActionChains(self.driver)
+            actions.key_down(Keys.CONTROL).key_down(Keys.SHIFT).send_keys('r').key_up(Keys.SHIFT).key_up(Keys.CONTROL).perform()
+            self.logger.info("🔄 Hard refresh performed")
+        except:
+            # Fallback: execute refresh via JS
+            self.driver.execute_script("location.reload(true);")
+    
+    def _notify_error(self, username, error_message):
+        """Send Discord notification for error"""
+        try:
+            hostname = self.machine_info.get("hostname", "Unknown")
+            embed = {
+                "title": "⚠️ Error Detected",
+                "description": f"**{username}** encountered an error",
+                "color": 0xFF6600,
+                "fields": [
+                    {"name": "Error", "value": error_message[:200], "inline": False},
+                    {"name": "Device", "value": hostname, "inline": True},
+                ],
+                "timestamp": datetime.now().isoformat(),
+            }
+            if hasattr(self, "notifier"):
+                self.notifier.send_discord(embed=embed)
+        except:
+            pass
+    
+    def _notify_timeout(self, username, timeout_type="heartbeat"):
+        """Send Discord notification for timeout"""
+        try:
+            hostname = self.machine_info.get("hostname", "Unknown")
+            embed = {
+                "title": "⏱️ Timeout Detected",
+                "description": f"**{username}** - {timeout_type} timeout",
+                "color": 0xFFCC00,
+                "fields": [
+                    {"name": "Type", "value": timeout_type, "inline": True},
+                    {"name": "Device", "value": hostname, "inline": True},
+                ],
+                "timestamp": datetime.now().isoformat(),
+            }
+            if hasattr(self, "notifier"):
+                self.notifier.send_discord(embed=embed)
+            
+            # Log to Firebase
+            self._log_event("timeout", username.lower(), f"{timeout_type} timeout detected")
+        except:
+            pass
 
     def _click_play_button(self):
         """Click the play button using JavaScript to avoid intercepts"""
@@ -531,19 +654,23 @@ class RobloxAutoLoginV6:
         except:
             pass
 
-    def wait_for_roblox_launch(self, username, wait_time=60):
+    def wait_for_roblox_launch(self, username, wait_time=20):
         """
-        Wait period after clicking play.
+        Wait period after clicking play, then minimize window.
         Actual monitoring is done by roblox_heartbeat.lua
         """
         self.logger.info(f"⏳ Waiting {wait_time}s for Roblox to launch...")
 
-        # The heartbeat.lua will update Firebase when player joins
-        # We just wait here to give time for the protocol handler
+        # Wait for Roblox to start
         time.sleep(wait_time)
+        
+        # Minimize Roblox windows after launch
+        minimized = minimize_roblox_windows()
+        if minimized > 0:
+            self.logger.info(f"🪟 Minimized {minimized} Roblox window(s)")
 
         # Update status - heartbeat.lua will change to 'in_game' when active
-        self._update_status(username, "waiting_heartbeat")
+        self._update_status(username.lower(), "waiting_heartbeat")
         return True
 
     def process_account(self, account, index, total):
@@ -563,9 +690,10 @@ class RobloxAutoLoginV6:
         # Join server
         if not self.join_server(username):
             self.logger.warning(f"❌ Failed to join for {username}")
+            return
 
-        # Wait for Roblox launch (60s to allow time for Bloxstrap)
-        self.wait_for_roblox_launch(username, wait_time=60)
+        # Wait for Roblox launch (20s then minimize)
+        self.wait_for_roblox_launch(username, wait_time=20)
 
         self.processed_accounts.append(username)
 
@@ -583,10 +711,10 @@ class RobloxAutoLoginV6:
             time.sleep(2)
 
     def _update_status(self, username, status):
-        """Update account status in Firebase"""
+        """Update account status in Firebase (normalized lowercase)"""
         try:
             self.firebase.update_account_status(
-                username,
+                username.lower(),
                 {
                     "status": status,
                     "hwid": self.hwid,
@@ -732,18 +860,18 @@ class RobloxAutoLoginV6:
         self.logger.info("🧹 Cleaning up...")
         self._close_browser()
         self._update_device_status("offline")
-    
+
     def run_single_account(self, username: str, password: str = None):
         """
         Run autorun for a single account.
         Used by AutorunController for individual account processing.
-        
+
         Args:
             username: Account username
             password: Account password (if not provided, will look up from accounts.json)
         """
         self.logger.info(f"🎯 Single account run: {username}")
-        
+
         # Find password if not provided
         if not password:
             all_accounts = safe_json_load(self.accounts_file, [])
@@ -751,13 +879,13 @@ class RobloxAutoLoginV6:
                 if acc.get("username", "").lower() == username.lower():
                     password = acc.get("password")
                     break
-        
+
         if not password:
             self.logger.error(f"❌ Password not found for {username}")
             return False
-        
+
         account = {"username": username, "password": password}
-        
+
         try:
             self.setup_driver()
             self.process_account(account, 1, 1)
@@ -775,31 +903,35 @@ def run_autorun_mode():
     """
     from services.autorun_controller import AutorunController
     from services.account_sync import AccountSyncManager
-    
+
     print("\n" + "=" * 60)
     print("🤖 Roblox Auto Login Bot v6 - AUTORUN MODE")
     print("=" * 60)
     print("This mode continuously monitors Firebase for offline accounts")
     print("and automatically runs them when detected.")
     print("=" * 60 + "\n")
-    
+
     # Create bot instance
     bot = RobloxAutoLoginV6()
-    
+
     # Create controller
     controller = AutorunController()
-    
+
     # Set callback to run account
     def run_account_callback(username: str, data: dict):
         """Callback to run single account"""
         bot.run_single_account(username)
-    
+
     controller.set_run_callback(run_account_callback)
-    
+
     # Mark device online
     bot._update_device_status("online")
-    bot._log_event("device_online", None, f"Device {bot.machine_info.get('hostname')} started (autorun mode)")
-    
+    bot._log_event(
+        "device_online",
+        None,
+        f"Device {bot.machine_info.get('hostname')} started (autorun mode)",
+    )
+
     try:
         controller.run_idle(check_interval=30)
     finally:
@@ -813,36 +945,41 @@ def run_default_mode(accounts_file=None, server_link=None, enable_ram_optimizer=
     2. Process all offline accounts
     3. Continuous sync + monitoring
     4. RAM optimization (background)
-    
+
     This is the unified mode that combines initial run + continuous monitoring.
     """
     from services.account_sync import AccountSyncManager
     from services.firebase_watcher import FirebaseWatcher
     from services.ram_optimizer import get_ram_optimizer, RamOptimizerConfig
-    
+
     print("\n" + "=" * 60)
-    print("🚀 Roblox Auto Login Bot v6.5 - UNIFIED MODE")
+    print("🚀 Roblox Auto Login Bot v6.6 - UNIFIED MODE")
     print("=" * 60)
     print("1. Initial sync from Firebase")
     print("2. Process offline accounts")
     print("3. Continuous sync + monitoring")
-    print("4. RAM optimization (background)" if enable_ram_optimizer else "4. RAM optimization (disabled)")
+    print(
+        "4. RAM optimization (background)"
+        if enable_ram_optimizer
+        else "4. RAM optimization (disabled)"
+    )
+    print("5. Window auto-minimize after launch")
     print("=" * 60 + "\n")
-    
+
     # Initialize components
     sync_manager = AccountSyncManager()
     watcher = FirebaseWatcher()
-    
+
     # Create bot instance
     bot = RobloxAutoLoginV6(
         accounts_file=accounts_file or ACCOUNTS_FILE,
-        server_link=server_link or DEFAULT_SERVER_LINK
+        server_link=server_link or DEFAULT_SERVER_LINK,
     )
-    
+
     bot.logger.info(f"🔑 HWID: {bot.hwid[:16]}...")
     bot.logger.info(f"💻 Host: {bot.machine_info.get('hostname')}")
-    
-    # Initialize RAM optimizer
+
+    # Initialize RAM optimizer with Firebase logging callback
     ram_optimizer = None
     if enable_ram_optimizer:
         try:
@@ -854,63 +991,80 @@ def run_default_mode(accounts_file=None, server_link=None, enable_ram_optimizer=
                 working_set_limit_mb=512,
                 min_working_set_mb=128,
                 safe_mode=True,
-                process_priority="below_normal"
+                process_priority="below_normal",
             )
             ram_optimizer = get_ram_optimizer(ram_config)
-            bot.logger.info(f"🧠 RAM Optimizer: enabled (threshold {ram_config.ram_threshold_percent}%)")
+            
+            # Log RAM optimization events to Firebase
+            def on_ram_optimized(result):
+                if result.get("optimized") and result.get("total_saved_mb", 0) > 0:
+                    bot._log_event(
+                        "ram_optimization",
+                        None,
+                        f"Saved {result['total_saved_mb']:.1f} MB across {result['instance_count']} instances"
+                    )
+            
+            ram_optimizer._on_optimization_callback = on_ram_optimized
+            bot.logger.info(
+                f"🧠 RAM Optimizer: enabled (threshold {ram_config.ram_threshold_percent}%)"
+            )
         except Exception as e:
             bot.logger.warning(f"⚠️ RAM Optimizer failed to initialize: {e}")
-    
+        except Exception as e:
+            bot.logger.warning(f"⚠️ RAM Optimizer failed to initialize: {e}")
+
     # Mark device online
     bot._update_device_status("online")
-    bot._log_event("device_online", None, f"Device {bot.machine_info.get('hostname')} started")
-    
+    bot._log_event(
+        "device_online", None, f"Device {bot.machine_info.get('hostname')} started"
+    )
+
     # ========================================
     # PHASE 1: Initial Sync
     # ========================================
     print("\n" + "-" * 40)
     print("📡 PHASE 1: Initial Sync from Firebase")
     print("-" * 40)
-    
+
     active_count, inactive_count = sync_manager.sync_status_to_local()
     print(f"   ✅ Synced: {active_count} need run, {inactive_count} already online")
-    
+
     # Get accounts needing run
     needs_run = sync_manager.get_accounts_needing_autorun()
-    
+
     # ========================================
     # PHASE 2: Process Offline Accounts
     # ========================================
     print("\n" + "-" * 40)
     print(f"🎮 PHASE 2: Processing {len(needs_run)} Offline Accounts")
     print("-" * 40)
-    
+
     if needs_run:
         for i, account in enumerate(needs_run, 1):
             username = account.get("username", "")
-            
+
             try:
                 print(f"\n[{i}/{len(needs_run)}] Processing: {username}")
-                
+
                 # Mark as running to prevent double-run
                 sync_manager.mark_account_running(username)
-                
+
                 # Run the account
                 bot.run_single_account(username)
-                
+
                 bot.logger.info(f"✅ Finished processing {username}")
-                
+
             except KeyboardInterrupt:
                 print("\n⚠️ Interrupted by user")
                 break
             except Exception as e:
                 bot.logger.error(f"❌ Error processing {username}: {e}")
                 continue
-        
+
         print(f"\n✅ Finished processing {len(needs_run)} accounts")
     else:
         print("   ✅ All accounts are already online!")
-    
+
     # ========================================
     # PHASE 3: Continuous Sync + Monitoring
     # ========================================
@@ -922,82 +1076,93 @@ def run_default_mode(accounts_file=None, server_link=None, enable_ram_optimizer=
     print("   RAM check: 300 seconds")
     print("   Press Ctrl+C to stop")
     print("-" * 40 + "\n")
-    
+
     # Start RAM optimizer background monitoring
     if ram_optimizer and ram_optimizer.enabled:
         ram_optimizer.start_monitoring()
         bot.logger.info("🧠 RAM optimizer monitoring started")
-    
+
     # Tracking for throttling
     last_sync_time = time.time()
     sync_interval = 60  # seconds between syncs
     heartbeat_interval = 30  # seconds between device heartbeats
     last_heartbeat = time.time()
-    
+
     # Track processed accounts to prevent re-run (username -> timestamp)
     recently_processed: dict = {}
     cooldown_time = 300  # 5 minutes cooldown per account
-    
+
     try:
         while True:
             current_time = time.time()
-            
+
             # Device heartbeat (every 30s)
             if current_time - last_heartbeat >= heartbeat_interval:
                 bot._update_device_status("online")
                 last_heartbeat = current_time
-            
+
             # Sync check (every 60s)
             if current_time - last_sync_time >= sync_interval:
                 # Get current status without modifying local file
                 online = set(watcher.get_all_online_accounts())
                 offline = set(watcher.get_all_offline_accounts())
-                
+
                 # Clear expired cooldowns
-                expired = [u for u, t in list(recently_processed.items()) 
-                          if current_time - t > cooldown_time]
+                expired = [
+                    u
+                    for u, t in list(recently_processed.items())
+                    if current_time - t > cooldown_time
+                ]
                 for u in expired:
                     del recently_processed[u]
-                
+
                 # Find accounts that need run (offline and not recently processed)
                 needs_run_now = []
                 for username in offline:
                     if username not in recently_processed:
                         needs_run_now.append(username)
-                
+
                 bot.logger.info(
                     f"📊 Sync: {len(online)} online, {len(offline)} offline, "
                     f"{len(needs_run_now)} need run"
                 )
-                
+
                 # Process any newly offline accounts
                 if needs_run_now:
-                    bot.logger.info(f"🎯 Found {len(needs_run_now)} accounts to process")
-                    
+                    bot.logger.info(
+                        f"🎯 Found {len(needs_run_now)} accounts to process"
+                    )
+
                     for username in needs_run_now:
                         try:
                             # Add to recently processed with timestamp
                             recently_processed[username] = current_time
-                            
+
                             # Sync update
                             sync_manager.mark_account_running(username)
-                            
+
                             # Run the account
                             bot.run_single_account(username)
-                            
+
                             bot.logger.info(f"✅ Auto-processed {username}")
-                            
+
                         except Exception as e:
-                            bot.logger.error(f"❌ Error auto-processing {username}: {e}")
-                
+                            bot.logger.error(
+                                f"❌ Error auto-processing {username}: {e}"
+                            )
+
                 last_sync_time = current_time
-            
+
             # Sleep to prevent CPU spinning
             time.sleep(5)
-            
+
     except KeyboardInterrupt:
         print("\n⚠️ Interrupted by user")
-        bot._log_event("device_offline", None, f"Device {bot.machine_info.get('hostname')} stopped by user")
+        bot._log_event(
+            "device_offline",
+            None,
+            f"Device {bot.machine_info.get('hostname')} stopped by user",
+        )
     finally:
         # Stop RAM optimizer
         if ram_optimizer:
@@ -1007,7 +1172,7 @@ def run_default_mode(accounts_file=None, server_link=None, enable_ram_optimizer=
                 f"🧠 RAM optimizer stats: {stats['optimizations']} optimizations, "
                 f"{stats['total_saved_mb']:.1f} MB saved"
             )
-        
+
         bot.cleanup()
         watcher.stop()
 
@@ -1017,20 +1182,20 @@ def run_sync_mode():
     Run in sync mode - sync Firebase status to local accounts.json once and exit.
     """
     from services.account_sync import AccountSyncManager
-    
+
     print("\n" + "=" * 60)
     print("🔄 Roblox Auto Login Bot v6 - SYNC MODE")
     print("=" * 60)
-    
+
     manager = AccountSyncManager()
-    
+
     # Do sync
     active, inactive = manager.sync_status_to_local()
-    
+
     print(f"\n✅ Sync complete:")
     print(f"   - {active} accounts set to active (offline in Firebase)")
     print(f"   - {inactive} accounts set to inactive (online in Firebase)")
-    
+
     # Show accounts needing autorun
     needs_run = manager.get_accounts_needing_autorun()
     if needs_run:
@@ -1039,7 +1204,7 @@ def run_sync_mode():
             print(f"   - {acc.get('username')}")
     else:
         print("\n✅ All accounts are online!")
-    
+
     print("\n" + "=" * 60)
 
 
@@ -1049,7 +1214,7 @@ def run_watch_mode():
     Does NOT auto-run accounts, just syncs status.
     """
     from services.account_sync import AccountSyncManager
-    
+
     print("\n" + "=" * 60)
     print("👁️ Roblox Auto Login Bot v6 - WATCH MODE")
     print("=" * 60)
@@ -1057,14 +1222,16 @@ def run_watch_mode():
     print("but does NOT auto-run accounts.")
     print("Press Ctrl+C to stop.")
     print("=" * 60 + "\n")
-    
+
     manager = AccountSyncManager()
     manager.start_auto_sync(interval=30)
-    
+
     try:
         while True:
             stats = manager.get_sync_stats()
-            print(f"📊 Status: {stats['online_accounts']} online, {stats['offline_accounts']} offline, syncs: {stats['sync_count']}")
+            print(
+                f"📊 Status: {stats['online_accounts']} online, {stats['offline_accounts']} offline, syncs: {stats['sync_count']}"
+            )
             time.sleep(30)
     except KeyboardInterrupt:
         print("\n⚠️ Interrupted by user")
@@ -1075,24 +1242,23 @@ def run_watch_mode():
 def run_ram_status():
     """Show RAM optimizer status and Roblox processes"""
     from services.ram_optimizer import get_ram_optimizer, RamOptimizerConfig
-    
+
     print("\n" + "=" * 60)
     print("🧠 Roblox RAM Optimizer - Status")
     print("=" * 60)
-    
+
     config = RamOptimizerConfig(
-        ram_threshold_percent=85.0,
-        aggressive_threshold_percent=92.0
+        ram_threshold_percent=85.0, aggressive_threshold_percent=92.0
     )
     optimizer = get_ram_optimizer(config)
-    
+
     if not optimizer.enabled:
         print("\n⚠️ RAM Optimizer is disabled (psutil not installed)")
         print("   Install with: pip install psutil")
         return
-    
+
     optimizer.print_status()
-    
+
     # Show process list
     processes = optimizer.get_roblox_processes()
     if processes:
@@ -1103,55 +1269,59 @@ def run_ram_status():
         for p in sorted(processes, key=lambda x: x.ram_mb, reverse=True):
             print(f"{p.pid:<10} {p.ram_mb:<12.1f} {p.cpu_percent:<10.1f} {p.priority}")
         print("-" * 50)
-        print(f"Total: {sum(p.ram_mb for p in processes):.1f} MB across {len(processes)} instances")
+        print(
+            f"Total: {sum(p.ram_mb for p in processes):.1f} MB across {len(processes)} instances"
+        )
     else:
         print("\n📭 No Roblox processes running")
-    
+
     print("\n" + "=" * 60)
 
 
 def run_ram_optimize():
     """Force RAM optimization now"""
     from services.ram_optimizer import get_ram_optimizer, RamOptimizerConfig
-    
+
     print("\n" + "=" * 60)
     print("🧠 Roblox RAM Optimizer - Force Optimization")
     print("=" * 60)
-    
+
     config = RamOptimizerConfig(
         ram_threshold_percent=0,  # Force optimization regardless of usage
-        safe_mode=True
+        safe_mode=True,
     )
     optimizer = get_ram_optimizer(config)
-    
+
     if not optimizer.enabled:
         print("\n⚠️ RAM Optimizer is disabled (psutil not installed)")
         return
-    
+
     print("\n🔧 Running optimization...")
     result = optimizer.optimize_all(force=True)
-    
+
     if result.get("optimized"):
         print(f"\n✅ Optimization complete!")
         print(f"   Instances: {result.get('instance_count', 0)}")
         print(f"   Total Roblox RAM: {result.get('total_roblox_mb', 0):.1f} MB")
         print(f"   RAM saved: {result.get('total_saved_mb', 0):.1f} MB")
-        
+
         if result.get("results"):
             print("\n   Per-process results:")
             for r in result["results"]:
                 status = "✅" if r.get("success") else "❌"
-                print(f"   {status} PID {r.get('pid')}: {r.get('before_mb', 0):.1f} → {r.get('after_mb', 0):.1f} MB")
+                print(
+                    f"   {status} PID {r.get('pid')}: {r.get('before_mb', 0):.1f} → {r.get('after_mb', 0):.1f} MB"
+                )
     else:
         print(f"\n📊 {result.get('message', 'No optimization needed')}")
-    
+
     print("\n" + "=" * 60)
 
 
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Roblox Auto Login Bot v6.5")
+    parser = argparse.ArgumentParser(description="Roblox Auto Login Bot v6.6")
     parser.add_argument("--accounts", "-a", default=ACCOUNTS_FILE)
     parser.add_argument("--server", "-s", default=DEFAULT_SERVER_LINK)
     parser.add_argument(
@@ -1219,9 +1389,9 @@ def main():
     else:
         # NEW DEFAULT: Unified mode with sync + run + monitoring + RAM optimization
         run_default_mode(
-            accounts_file=args.accounts, 
+            accounts_file=args.accounts,
             server_link=args.server,
-            enable_ram_optimizer=not args.no_ram_optimizer
+            enable_ram_optimizer=not args.no_ram_optimizer,
         )
 
 
