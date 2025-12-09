@@ -199,6 +199,9 @@ class RobloxAutoLoginV6:
             try:
                 self.driver.get("https://www.roblox.com/login")
                 time.sleep(2)
+                
+                # Check for "Verifying browser" POW check and bypass
+                self._bypass_verifying_browser()
 
                 # Fill credentials
                 user_field = WebDriverWait(self.driver, 10).until(
@@ -217,6 +220,9 @@ class RobloxAutoLoginV6:
 
                 # Wait for redirect or error
                 time.sleep(3)
+                
+                # Check for "Verifying browser" POW check after submit
+                self._bypass_verifying_browser()
 
                 # Detect what type of challenge is present
                 challenge_type = self._detect_challenge_type()
@@ -487,21 +493,8 @@ class RobloxAutoLoginV6:
             self.driver.get(self.server_link)
             time.sleep(2)
             
-            # Check and bypass "Verifying browser" with retry loop
-            max_verify_attempts = 5
-            for attempt in range(max_verify_attempts):
-                if self._check_verifying_browser():
-                    self.logger.info(f"🔄 Detected 'Verifying browser' (attempt {attempt + 1}/{max_verify_attempts}) - performing hard refresh")
-                    self._hard_refresh()
-                    time.sleep(3)
-                else:
-                    break
-            
-            # Final check - if still verifying, try full page reload
-            if self._check_verifying_browser():
-                self.logger.warning("⚠️ Still verifying after retries, trying full reload")
-                self.driver.refresh()
-                time.sleep(5)
+            # Bypass "Verifying browser" POW check
+            self._bypass_verifying_browser()
             
             # Wait for page load
             WebDriverWait(self.driver, 15).until(
@@ -572,6 +565,81 @@ class RobloxAutoLoginV6:
             self.logger.debug(f"ActionChains failed: {e}, using JS reload")
             # Fallback: execute refresh via JS
             self.driver.execute_script("location.reload(true);")
+    
+    def _check_pow_verifying(self):
+        """
+        Check specifically for FunCaptcha POW 'Verifying browser...' screen.
+        This appears in #FunCaptcha iframe or #challenge container.
+        """
+        try:
+            # Method 1: Check for pow-iframe with verifying
+            try:
+                pow_iframe = self.driver.find_element(By.ID, "pow-iframe")
+                if pow_iframe.is_displayed():
+                    # Switch to iframe to check content
+                    self.driver.switch_to.frame(pow_iframe)
+                    try:
+                        body_text = self.driver.find_element(By.TAG_NAME, "body").text.lower()
+                        if "verifying" in body_text:
+                            return True
+                    finally:
+                        self.driver.switch_to.default_content()
+            except:
+                pass
+            
+            # Method 2: Check #FunCaptcha container
+            try:
+                funcaptcha = self.driver.find_element(By.ID, "FunCaptcha")
+                if funcaptcha.is_displayed():
+                    # Check page source for POW verifying text
+                    page_source = self.driver.page_source.lower()
+                    if '"pow.loading_info":"verifying browser"' in page_source or "verifying browser" in page_source:
+                        # Only return True if it's the POW check, not actual captcha
+                        # Check if there's NO visual challenge yet
+                        try:
+                            visual_challenge = self.driver.find_element(By.CSS_SELECTOR, "iframe[title*='Visual challenge']")
+                            if visual_challenge.is_displayed():
+                                return False  # It's actual captcha, not POW
+                        except:
+                            pass
+                        return True
+            except:
+                pass
+            
+            # Method 3: Check #challenge container for POW
+            try:
+                challenge = self.driver.find_element(By.ID, "challenge")
+                if challenge.is_displayed() and "active" in challenge.get_attribute("class"):
+                    html = challenge.get_attribute("innerHTML").lower()
+                    if "verifying browser" in html and "pow-iframe" in html:
+                        return True
+            except:
+                pass
+                
+        except:
+            pass
+        return False
+    
+    def _bypass_verifying_browser(self):
+        """
+        Bypass 'Verifying browser...' POW check by hard refresh.
+        Only triggers on POW verification, not actual captcha challenges.
+        """
+        max_attempts = 5
+        for attempt in range(max_attempts):
+            # Check both general verifying and specific POW verifying
+            if self._check_verifying_browser() or self._check_pow_verifying():
+                self.logger.info(f"🔄 Detected 'Verifying browser' POW (attempt {attempt + 1}/{max_attempts}) - hard refresh")
+                self._hard_refresh()
+                time.sleep(3)
+            else:
+                return True  # No verifying, continue
+        
+        # Still verifying after max attempts
+        if self._check_verifying_browser() or self._check_pow_verifying():
+            self.logger.warning("⚠️ Still in 'Verifying browser' after max retries")
+            return False
+        return True
     
     def _notify_error(self, username, error_message):
         """Send Discord notification for error"""
